@@ -1,0 +1,669 @@
+#!/usr/bin/env ruby
+
+Dir.chdir(File.dirname($0))
+
+require "rubygems"
+require 'libglade2'
+require "find"
+require "yaml"
+require "gdbm"
+
+require "audio_info"
+require "cover_scanner"
+
+require 'fileutils'
+require "timeout"
+
+#wrap long filenames in thumbnail label
+require "facet/string/line_wrap"
+
+# for rotate
+require "tempfile"
+require "facet/string/shell_escape"
+require "facet/fileutils/which"
+require "thread" #for Queue
+
+JPEGTRAN = FileUtils.which("jpegtran") 
+
+class FullsizeWindow < Gtk::Window
+  def initialize(filename)
+    super(TOPLEVEL)
+    image = Gtk::Image.new(filename)
+    image_container = Gtk::EventBox.new
+    image_container.add(image)
+    image_container.signal_connect("button_press_event") do 
+      destroy
+    end
+    add(image_container)
+    show_all
+  end
+end
+
+class Cover < Gtk::Frame
+  attr_reader :pixels
+  
+  def initialize(pixels)
+    super()
+    @pixels = pixels
+  end
+end
+
+# load the modules
+Dir.glob("search/*.rb") { |f| require(f) }
+
+class SearchCancelledException < Exception; end
+
+class CoverIt
+
+  VERSION = "0.1"
+  IMAGE_WIDTH = 150
+  HTTP_TIMEOUT = 10
+  MAX_CACHED_FILES = 1000
+  NUM_DOWNLOAD_THREADS = 3
+  BASENAME = File.basename($0).sub(/\..+$/, '')
+
+  CACHE_DIR = File.expand_path("~/.#{BASENAME}")
+  CACHE_FILE = CACHE_DIR+"/cache.db"
+  CONFIG_FILE = CACHE_DIR+"/config"
+  IMAGES_DIR = CACHE_DIR+"/images"
+  
+  def initialize
+    @config = YAML::load_file(CONFIG_FILE) rescue {}
+    #@glade = GladeXML.new(DATA.read, nil, nil, GladeXML::BUFFER) {|handler| method(handler)}
+    @glade = GladeXML.new("#{BASENAME}.glade") { |handler| method(handler)}
+    @glade["main_window"].title = "CoverIt #{VERSION}"
+    #@glade["main_window"].icon = Gdk::Pixbuf.new("icon.xpm")
+    #Gtk::Window.default_icon_list = [Gdk::Pixbuf.new("icon.xpm")]
+    @image_frame = @glade["image_frame"]
+    
+    @statusbar = @glade["statusbar"]
+    @search_button_label = @glade["search_button_label"]
+    @search_button_image = @glade["search_button_image"]
+    @treeview = @glade["treeview1"]
+    @disk_image_view = @glade["disk_image_view"]
+    @internet_image_view = @glade["internet_image_view"]
+    @search_entry = @glade["search_entry"]
+
+    @scan_buttons_table = @glade["scan_buttons_table"]
+    @searchers_hbox = @glade["searchers_hbox"]
+    
+    @search_button = @glade["search_button"]
+    @progress_bar = @glade["progressbar1"]
+    @config['srcdir'] ||= "not defined"
+
+    set_root_dir(@config['srcdir'])
+
+    @glade["hpaned1"].position = IMAGE_WIDTH*3
+    @model = Gtk::ListStore.new(String, String, String, Hash)
+    @treeview.model = @model
+    ["images", "album", "artist"].each_with_index do |cname, i|
+      renderer = Gtk::CellRendererText.new
+      col = Gtk::TreeViewColumn.new(cname, renderer, {:text => i} )
+      col.set_sort_column_id(i)
+
+#      col.set_cell_data_func(renderer) do |col, renderer, model, iter|
+#	if iter[2].images.empty? #.oid == 1
+#	  renderer.background = "red"
+#	else
+#	  renderer.background = nil
+#	end
+#      end
+      @treeview.append_column(col) 
+    end
+    @treeview.selection.set_mode(Gtk::SELECTION_SINGLE)
+    @treeview.headers_clickable = true
+    @treeview.columns.each do |col|
+      col.sort_indicator = true
+      col.resizable = true
+    end
+
+    CoverSearch.constants.sort.each do |mod|
+      check_btn = Gtk::CheckButton.new(mod.downcase)
+      check_btn.active = true
+      @searchers_hbox.pack_start_defaults(check_btn)
+    end
+    @searchers_hbox.show_all
+
+
+    CoverScanner::DIMENSIONS.keys.sort.each_with_index do |type, i|
+      btn = Gtk::Button.new(type, false)
+      btn.signal_connect("clicked") do |btn|
+        on_scan_cover(type)
+      end
+      @scan_buttons_table.attach_defaults(btn, i%2, i%2 + 1, i/2, i/2 +1)
+    end
+    @scan_buttons_table.show_all
+
+=begin
+    Search.methods.sort.grep(/^search_(.+)/) do
+      check_btn = Gtk::CheckButton.new($1)
+      check_btn.active = true
+      @searchers_hbox.pack_start_defaults(check_btn)
+    end
+    @searchers_hbox.show_all
+=end
+    
+    #we fix the size of the button
+    @search_button.width_request = @search_button.size_request[0]
+
+    set_search_state(:search)
+
+    #@albums_cache = Marshal.load(File.read(CACHE_FILE)) rescue {}
+    @albums_cache = GDBM.new(CACHE_FILE, 0644)
+
+    FileUtils.mkdir_p(CACHE_DIR)
+    FileUtils.mkdir_p(IMAGES_DIR)
+
+    ################################
+    #Starting download threads
+    ################################
+
+    @download_queue = Queue.new
+    @download_threads = (0..NUM_DOWNLOAD_THREADS).collect do 
+      Thread.new do
+        #Thread.priority = -1
+	loop do
+	  begin
+	    #Thread.exit if urls_queue.empty? and searchers_done
+	    Thread.current["active"] = false
+	    url, searchname = @download_queue.pop
+	    Thread.current["active"] = true
+	    begin
+	      basename = File.basename(url)
+	      image = nil
+	      Timeout.timeout(HTTP_TIMEOUT) do
+		image = download_to_cache(url)
+	      end
+	      search_progress()
+	      load_image(@internet_image_view, image, basename, searchname)
+	      @total_loaded += 1
+	    rescue StandardError
+	    rescue Timeout::Error
+	      #log("timed out!")
+	    end
+
+	    ## test if search is done
+	    if @download_queue.empty? and not @search_thread.alive? and @download_threads.detect { |t| t != Thread.current and t["active"] }.nil?
+	      search_done()
+	    end
+	  rescue SearchCancelledException
+	  rescue Timeout::Error => e
+	    log("#{Thread.current.object_id} #{e.inspect}")
+	  end
+	end
+      end
+    end
+
+  end
+
+
+  def on_button_scan_clicked(btn)
+    @model.clear
+    srcdir = GLib.filename_from_utf8(@glade["label_root_dir"].text)
+    btn.sensitive = false
+    Thread.new do
+      Thread.current.priority = -2
+      dirs = []
+
+      Find.find(srcdir) do |dir|
+	next unless test(?d, dir)
+	dirs << dir
+      end
+
+      dirs.sort { |a,b| File.mtime(a) <=> File.mtime(b) }.reverse.each do |dir|
+        #next if AudioAlbum.discnum(dir) >= 2
+
+	mtime = File.mtime(dir)
+	db_entry = @albums_cache[dir]
+
+	if db_entry
+	  album = Marshal.load(db_entry)
+	end
+
+	if db_entry.nil? or album["mtime"] < mtime
+	  puts "CACHE MISS"
+	  p dir
+	  album = {}
+	  album["mtime"] = mtime
+          begin
+	    audio_album = AudioAlbum.new(dir, true)
+	    if !audio_album.empty?
+	      infos = audio_album.infos
+	      infos["album"] = infos["album"].first if infos["album"].is_a?(Array)
+	      album.update(infos)
+	      album["dir"] = dir
+	      album["num_images"] = AudioAlbum.images(dir).size.to_s
+	      album["valid"] = true
+	    end
+	  rescue AudioInfoError => e
+	    p e
+	  end
+	  @albums_cache[dir] = Marshal.dump(album)
+	end
+
+	if album["valid"]
+	  iter = @model.append
+	  iter[0] = album["num_images"].to_s
+	  iter[1] =  GLib.locale_to_utf8(album["album"].to_s)
+	  #iter[1] =  album.images.empty? ? "no" : "yes"
+	  iter[2] =  GLib.locale_to_utf8(album["artist"].to_s)
+	  iter[3] =  album
+	end
+      end
+      #@model.set_sort_column_id(0)
+      log("loading complete")
+      btn.sensitive = true
+    end
+  end
+
+  def on_button_choose_root_dir_clicked(btn)
+    dialog = Gtk::FileChooserDialog.new("Open File", nil,
+      Gtk::FileChooser::ACTION_SELECT_FOLDER, nil,
+      [Gtk::Stock::CANCEL, Gtk::Dialog::RESPONSE_CANCEL],
+      [Gtk::Stock::OPEN, Gtk::Dialog::RESPONSE_ACCEPT])
+    
+    current_folder = GLib.filename_from_utf8(@glade["label_root_dir"].text)
+    if File.exists?(current_folder)
+      dialog.current_folder = current_folder
+    end
+
+    dialog.run do |response|
+      if response == Gtk::Dialog::RESPONSE_ACCEPT
+        @config['srcdir'] = dialog.filename
+	set_root_dir(dialog.filename)
+      end
+      dialog.destroy
+    end
+  end
+
+  def set_root_dir(dir)
+    @glade["label_root_dir"].text = GLib.filename_to_utf8(dir)
+    @root_dir = dir
+  end
+  
+  def log(line)
+    @context_id ||= @statusbar.get_context_id("main")
+    @statusbar.pop(@context_id)
+    @statusbar.push(@context_id, line)
+    puts line
+  end
+
+  def on_search_for_images #(clicked)
+    if @search_button_state == :search
+      @search_thread = Thread.new do 
+	clear_images(@internet_image_view)
+	log("searching for images...")
+	results = []
+	q = GLib.locale_from_utf8(@search_entry.text).downcase
+
+	@total_results = @total_loaded = @total_processed = 0
+	@searchers_hbox.each do |check_btn| 
+	  next unless check_btn.active?
+	  name = check_btn.label
+	  log("searching on #{name}...")
+	  begin
+	    #res = Search.send("search_#{name}", q)
+	    kls = CoverSearch.const_get(name.capitalize)
+	    search_obj = kls.new
+	    res = search_obj.search(q)
+	    #res = Search.send("search_#{name}", q)
+	  rescue Exception
+	    res = []
+	  end
+	  results << [name, res]
+	  raise("bad result of '#{name}'") if res.nil?
+	  @total_results += res.size
+	  log("#{name} found #{res.size} results")
+	  res.each { |url| @download_queue << [ url, name] }
+	end
+
+	if @total_results == 0
+	  search_done()
+	end
+	#@download_threads.list.each { |t| total == 0 ?  t.kill : t.join }
+
+      end
+      set_search_state(:stop)
+    else
+      search_cancelled()
+    end
+  end
+
+  def on_clear_internet_images
+    clear_images(@internet_image_view)
+  end
+
+  def on_album_selected(treeview)
+    row = treeview.selection.selected
+    return unless row
+    @selected_album = row[3]
+    #return if @selected_album.nil?
+    search_str = ( @selected_album["artist"] == "various" ? "" : @selected_album["artist"] + " " ) + @selected_album["album"].gsub(AudioAlbum::MULTICD_REGEXP, '')
+    search_str = search_str.tr("-:+&,/", " ").gsub(/\([^)]+\)/, '').gsub(/\s+/, " ")
+    @search_entry.text = GLib.locale_to_utf8(search_str)
+    refresh_album_images
+  end
+
+  def on_scan_cover(type)
+    if @selected_album.nil?
+      return
+    end
+
+    Thread.new do
+      @progress_bar.fraction = 0
+      @progress_bar.text = "preparing for scan..."
+
+      CoverScanner.scan(type, @selected_album["dir"]) do |percent|
+	@progress_bar.fraction = percent/100.0
+	@progress_bar.text = "#{percent}%"
+      end
+
+      @progress_bar.fraction = 0
+      @progress_bar.text = ""
+      refresh_album_images
+    end
+  end
+  
+  def refresh_album_images
+    clear_images(@disk_image_view)
+    #images = Dir.glob( File.join(@selected_album["dir"], "*.{jpg,jpeg,gif}") ).collect { |f| File.expand_path(f) }
+    images = AudioAlbum.images(@selected_album["dir"])
+    n = images.size
+    @treeview.selection.selected[0] = n.to_s
+    @albums_cache[@selected_album["dir"]]["num_images"] = n.to_s
+    
+    arr = [ @selected_album["dir"].sub(/^#{@root_dir}\/?/, '') ]
+    arr += if n == 0
+      ["no", ""]
+    elsif n == 1
+      [n, ""]
+    else
+      [n, "s"]
+    end
+    log("\"%s\": %s image%s" % arr)
+
+    images.each do |image|
+      begin
+        load_image( @disk_image_view, image, File.basename(image), "filesystem" )
+      rescue Exception
+      end
+    end
+  end
+
+  def clear_images(image_view)
+    image_view.each { |c| image_view.remove(c) }
+    
+    # force the garbage collection
+    GC.start
+  end
+
+  def load_image(image_view, im, name, source)
+    imbuf = Gdk::Pixbuf.new(im)
+
+    pixels = imbuf.width+imbuf.height
+    image_width, image_height = imbuf.width, imbuf.height
+    raise("image too small #{image_width}x#{image_height}") if source != 'filesystem' and imbuf.width == 1 and imbuf.height == 1
+
+    label_text = []
+    label_text << sprintf("%dx%d", image_width, image_height)
+    label_text << name.line_wrap(30).chop
+    label_text << source unless source == 'filesystem'
+    if image_width > IMAGE_WIDTH
+      w = IMAGE_WIDTH
+      h = (w*image_height)/image_width
+      #str = sprintf("image scaled from %dx%d to %dx%d", imbuf.width, imbuf.height, w, h)
+      imbuf = imbuf.scale( w, h) #, Gdk::Pixbuf::INTERP_NEAREST)
+    end
+    image = Gtk::Image.new(imbuf)
+    image_container = Gtk::EventBox.new
+    image_container.add(image)
+    image_container.signal_connect("button_press_event") do |image, event|
+      if event.button == 1
+	FullsizeWindow.new(im)
+      end
+    end
+
+    #homogeneous, spacing
+    box = Gtk::VBox.new(false, 0)
+
+    label_text.each do |text|
+      label = Gtk::Label.new(text)
+      box.pack_start(label, false, false)
+    end
+    
+    box.pack_start(image_container, false, false)
+    
+    if source == 'filesystem'
+      menu = Gtk::Menu.new
+
+      menu_item = Gtk::MenuItem.new("delete")
+      menu_item.signal_connect("activate") do
+	dialog = Gtk::MessageDialog.new(
+	  nil, 
+	  Gtk::Dialog::DESTROY_WITH_PARENT, 
+	  Gtk::MessageDialog::WARNING, 
+	  Gtk::MessageDialog::BUTTONS_YES_NO, 
+	  "delete '#{im}' ?")
+	dialog.run do |response|
+	  if response == Gtk::Dialog::RESPONSE_YES
+	    FileUtils.rm(im)
+	    refresh_album_images
+	    log("'#{im}' deleted")
+	  end
+	  dialog.destroy 
+	end
+      end
+      menu.append(menu_item)
+      
+      unless im =~ /folder.[^.]+$/
+        menu_item = Gtk::MenuItem.new("set as folder")
+	menu_item.signal_connect("activate") do
+	  ext = File.extname(im)
+	  dst = File.join(File.dirname(im), "folder"+ext)
+	  if File.exists?(dst)
+	    new_fn = get_free_image_fn(@selected_album, ext)
+	    FileUtils.mv(dst, new_fn, :verbose => true)
+	    FileUtils.touch(new_fn)
+	  end
+	  FileUtils.mv(im, dst, :verbose => true)
+	  FileUtils.touch(dst, :verbose => true)
+	  refresh_album_images
+	end
+        menu.append(menu_item)
+      end
+      if JPEGTRAN
+	rotate_menu = Gtk::Menu.new
+	actions = [ %w{left 270}, %w{right 90}, %w{180 180} ]
+	
+	actions.each do |orientation, degrees|
+	  menu_item = Gtk::MenuItem.new(orientation)
+	  menu_item.signal_connect("activate") do
+            jpegtran_cmd("-rotate #{degrees}", im, im)
+	    refresh_album_images
+	  end
+	  rotate_menu.append(menu_item)
+	end
+
+	menu_item = Gtk::MenuItem.new("rotate")
+	menu_item.submenu = rotate_menu
+	menu.append(menu_item)
+
+	crop_menu = Gtk::Menu.new
+	%w{left right top bottom}.each do |orientation|
+	  menu_item = Gtk::MenuItem.new(orientation)
+	  menu_item.signal_connect("activate") do
+	    crop_image(orientation, im, get_free_image_fn(@selected_album, ".jpg"), image_width, image_height)
+	  end
+	  crop_menu.append(menu_item)
+	end
+
+	menu_item = Gtk::MenuItem.new("crop")
+	menu_item.submenu = crop_menu
+	menu.append(menu_item)
+      end
+
+      menu.show_all
+      image_container.signal_connect("button_press_event") do |image, event|
+	if event.button == 3
+	  menu.popup(nil, nil, event.button, event.time)
+	end
+      end
+
+    else
+      btn_box = Gtk::VButtonBox.new
+      btn_box.layout_style = Gtk::ButtonBox::SPREAD
+    
+      btn = Gtk::Button.new("save")
+      btn.signal_connect("clicked") do |btn|
+	ext = File.extname(im)
+	images = AudioAlbum.images(@selected_album["dir"])
+	if images.detect { |f| File.basename(f) =~ /folder\.[^.]+$/ }
+	  fn = get_free_image_fn(@selected_album, ext)
+	else
+	  fn = File.join( @selected_album["dir"], "folder#{ext}")
+	end
+
+	begin
+	  raise("source not found") unless File.exists?(im)
+	  FileUtils.cp(im, fn)
+	  refresh_album_images
+	  log("image saved in '#{fn}'")
+	rescue Exception => e
+	  log("fail to save image: '#{e}'")
+	end
+      end
+      btn_box.add(btn)
+      box.pack_start(btn_box, false, false)
+    end
+
+
+    #imbuf = Gtk::Button.new
+
+    frame = Cover.new(pixels)
+    frame.shadow_type = Gtk::SHADOW_ETCHED_OUT
+    frame.add(box)
+
+    #widget, expand, fill, padding
+    image_view.pack_start(frame, false, false, 0)
+
+    #reorder to have biggest picture first
+    if source != "filesystem"
+      pos = 0
+      image_view.each do |child|
+	break if child.pixels <= frame.pixels
+	pos += 1
+      end
+      image_view.reorder_child(frame, pos)
+    end
+
+    frame.show_all
+    image_view.show
+  end
+
+  def gtk_main_quit
+    @albums_cache.close
+    # writing cache
+    #File.open(CACHE_FILE, "w") { |f| f.puts(Marshal.dump(@albums_cache)) } 
+
+    # writing config
+    File.open(CONFIG_FILE, "w") { |f| f.write(@config.to_yaml) }
+
+    # cleanup the images cache
+    cached_files = Dir.glob(IMAGES_DIR+"/*")
+    if cached_files.size > MAX_CACHED_FILES
+      #Dir.glob[IMAGES_DIR+"/*"].sort_by { |f| File.mtime(f) }
+      too_old = cached_files.sort_by { |f| File.mtime(f) }[0, MAX_CACHED_FILES]
+      FileUtils.rm_f(too_old)
+    end
+    Gtk.main_quit
+  end
+
+  def get_free_image_fn(selected_album, ext)
+    prefix = File.join( selected_album["dir"], selected_album["album"].tr("/", "_") + "_00")
+    prefix.succ! while test(?f, prefix+ext)
+    prefix+ext
+  end
+
+  def download_to_cache(url)
+    cached_fn = File.join( IMAGES_DIR, URI.escape(url, /["\/:;|=,\[\]]/) )
+    
+    unless test(?f, cached_fn)
+      uri = URI.parse(url)
+      begin
+        http = open(uri)
+        #file_str = Net::HTTP.get(uri)
+	File.open(cached_fn, "w") { |f| FileUtils.copy_stream(http, f) }
+      end
+    end
+    cached_fn
+  end
+
+  def set_search_state(state)
+    @progress_bar.fraction = 0
+    @progress_bar.text = ""
+    @search_button_image.stock = ( state == :stop ? Gtk::Stock::STOP : Gtk::Stock::FIND )
+    @search_button_label.text = ( state == :stop ? "stop" : "search" )
+    @search_button_state = state
+  end
+
+  def search_progress
+    @total_processed += 1
+    new_val = (1.0/@total_results)*@total_processed
+    @progress_bar.fraction = new_val
+    #@label.set_text("#{(new_val * 100).to_i}")
+    @progress_bar.text = "#{@total_processed}/#{@total_results}"
+    #@progress_bar.pulse
+  end
+  
+  def search_message(prefix)
+    log( prefix + ", " + ( @total_loaded == 0 ? "no results." : "#{@total_loaded} images displayed") )
+  end
+
+  def search_done
+    search_message("search done")
+    set_search_state(:search)
+  end
+
+  def search_cancelled
+    @search_thread.kill
+    @download_queue.clear
+    @download_threads.each { |t| t.raise(SearchCancelledException) } #if @download_threads
+    search_message("search cancelled")
+    set_search_state(:search)
+  end
+
+  def jpegtran_cmd(options, src, dst)
+    return false if src !~ /\.jpe?g$/i
+    tf = Tempfile.new(BASENAME)
+    tf.close
+    cmd = "#{JPEGTRAN} #{options} -copy all -outfile #{tf.path} #{src.shell_escape}"
+    if status = system(cmd)
+      FileUtils.cp(tf.path, dst)
+      FileUtils.chmod(0644, dst)
+    end
+    tf.close!
+    return status
+  end
+
+  def crop_image(orientation, src, dst, w, h)
+     x, y, w, h = { 
+	"left"  	=> [0, 0, w/2, h],
+	"right" 	=> [w/2, 0, w/2, h],
+	"top" 		=> [0, 0, w, h/2],
+	"bottom" 	=> [0, h/2, w, h/2] 
+    }[orientation]
+
+    dst = get_free_image_fn(@selected_album, ".jpg")
+    if !jpegtran_cmd("-crop #{w}x#{h}+#{x}+#{y}", src, dst)
+      log("jpegtran error")
+    else
+      refresh_album_images
+    end
+  end
+
+end
+
+Gtk.init
+CoverIt.new
+Thread.abort_on_exception = true
+Gtk.main
