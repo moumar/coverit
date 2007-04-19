@@ -132,7 +132,7 @@ class CoverIt
       end
       @scan_buttons_table.attach_defaults(btn, i%2, i%2 + 1, i/2, i/2 +1)
     end
-    @scan_buttons_table.show_all
+    #@scan_buttons_table.show_all
 
 =begin
     Search.methods.sort.grep(/^search_(.+)/) do
