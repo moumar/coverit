@@ -2,7 +2,7 @@ require "cgi"
 require "mechanize"
 require "pp"
 
-module CoverSearch
+module CoverSearch_
   class Walmart
     PRODUCTS_PER_PAGE = 20 # or 40
     WALMART_URL = "http://www.walmart.com/catalog/search-ng.gsp?search_constraint=4104&search_query=%s&Continue.x=0&Continue.y=0&Continue=Find&ics=#{PRODUCTS_PER_PAGE}&ico=%d"

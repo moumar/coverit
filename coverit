@@ -205,13 +205,23 @@ class CoverIt
       Thread.current.priority = -2
       dirs = []
 
+      @progress_bar.fraction = 0
+      @progress_bar.text = "counting albums..."
+
       Find.find(srcdir) do |dir|
 	next unless test(?d, dir)
 	dirs << dir
       end
+      total = dirs.size
+      i = 0
+
+      refresh_album_images
 
       dirs.sort { |a,b| File.mtime(a) <=> File.mtime(b) }.reverse.each do |dir|
         #next if AudioAlbum.discnum(dir) >= 2
+	i += 1
+        @progress_bar.fraction = (1.0/total)*i
+        @progress_bar.text = "#{i+1}/#{total}"
 
 	mtime = File.mtime(dir)
 	db_entry = @albums_cache[dir]
@@ -251,6 +261,8 @@ class CoverIt
 	end
       end
       #@model.set_sort_column_id(0)
+      @progress_bar.fraction = 0
+      @progress_bar.text = ""
       log("loading complete")
       btn.sensitive = true
     end
@@ -366,6 +378,7 @@ class CoverIt
   
   def refresh_album_images
     clear_images(@disk_image_view)
+    return unless @selected_album
     #images = Dir.glob( File.join(@selected_album["dir"], "*.{jpg,jpeg,gif}") ).collect { |f| File.expand_path(f) }
     images = AudioAlbum.images(@selected_album["dir"])
     n = images.size
