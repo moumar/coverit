@@ -1,7 +1,7 @@
 #amazon search
 require 'amazon/search'
 
-module AmazonBase
+class AmazonBase
   def search(query)
     begin
       res = @req.keyword_search(query, 'music')
@@ -17,19 +17,21 @@ module AmazonBase
 end
 
 module CoverSearch 
-  class Amazon
-    include AmazonBase
-
+  class Amazon < AmazonBase
     def initialize
       @req = ::Amazon::Search::Request.new
     end
   end
 
-  class Amazonfr
-    include AmazonBase
-
+  class Amazonfr < AmazonBase
     def initialize
       @req = ::Amazon::Search::Request.new(nil, nil, 'fr')
+    end
+  end
+
+  class Amazonuk < AmazonBase
+    def initialize
+      @req = ::Amazon::Search::Request.new(nil, nil, 'uk')
     end
   end
 end
