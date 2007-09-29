@@ -254,9 +254,16 @@ class CoverIt
 	if album["valid"]
 	  iter = @model.append
 	  iter[0] = album["num_images"].to_s
-	  iter[1] =  GLib.locale_to_utf8(album["album"].to_s)
-	  #iter[1] =  album.images.empty? ? "no" : "yes"
-	  iter[2] =  GLib.locale_to_utf8(album["artist"].to_s)
+	  begin
+	    iter[1] =  GLib.locale_to_utf8(album["album"].to_s)
+	  rescue GLib::ConvertError
+	    iter[1] = album["album"].to_s
+	  end
+	  begin
+	    iter[2] =  GLib.locale_to_utf8(album["artist"].to_s)
+	  rescue GLib::ConvertError
+	    iter[2] =  album["artist"].to_s
+	  end
 	  iter[3] =  album
 	end
       end
