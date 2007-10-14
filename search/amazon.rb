@@ -12,7 +12,7 @@ module CoverSearch
 	  result.products.each do |prod|
 	    links << [ prod.image_url_small, prod.image_url_medium, prod.image_url_large ]
 	  end
-	rescue Amazon::Search::Request::SearchError => e
+	rescue ::Amazon::Search::Request::SearchError => e
 	  #log(e.message + " '#{search_str}'")
 	end
       end
