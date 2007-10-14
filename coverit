@@ -148,11 +148,11 @@ class CoverIt
 
     set_search_state(:search)
 
-    #@albums_cache = Marshal.load(File.read(CACHE_FILE)) rescue {}
-    @albums_cache = GDBM.new(CACHE_FILE, 0644)
-
     FileUtils.mkdir_p(CACHE_DIR)
     FileUtils.mkdir_p(IMAGES_DIR)
+
+    #@albums_cache = Marshal.load(File.read(CACHE_FILE)) rescue {}
+    @albums_cache = GDBM.new(CACHE_FILE, 0644)
 
     ################################
     #Starting download threads
