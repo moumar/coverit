@@ -255,12 +255,12 @@ class CoverIt
 	  iter = @model.append
 	  iter[0] = album["num_images"].to_s
 	  begin
-	    iter[1] =  GLib.locale_to_utf8(album["album"].to_s)
+	    iter[1] =  GLib.locale_to_utf8(album["album"].to_s) rescue album["album"].to_s
 	  rescue GLib::ConvertError
 	    iter[1] = album["album"].to_s
 	  end
 	  begin
-	    iter[2] =  GLib.locale_to_utf8(album["artist"].to_s)
+	    iter[2] =  GLib.locale_to_utf8(album["artist"].to_s) rescue album["artist"].to_s
 	  rescue GLib::ConvertError
 	    iter[2] =  album["artist"].to_s
 	  end
@@ -359,7 +359,7 @@ class CoverIt
     #return if @selected_album.nil?
     search_str = ( @selected_album["artist"] == "various" ? "" : @selected_album["artist"] + " " ) + @selected_album["album"].gsub(AudioAlbum::MULTICD_REGEXP, '')
     search_str = search_str.tr("-:+&,/", " ").gsub(/\([^)]+\)/, '').gsub(/\s+/, " ")
-    @search_entry.text = GLib.locale_to_utf8(search_str)
+    @search_entry.text = GLib.locale_to_utf8(search_str) rescue search_str
     refresh_album_images
   end
 
