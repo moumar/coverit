@@ -389,7 +389,9 @@ class CoverIt
     #images = Dir.glob( File.join(@selected_album["dir"], "*.{jpg,jpeg,gif}") ).collect { |f| File.expand_path(f) }
     images = AudioAlbum.images(@selected_album["dir"])
     n = images.size
-    @treeview.selection.selected[0] = n.to_s
+    if s = @treeview.selection.selected
+      s[0] = n.to_s
+    end
     @albums_cache[@selected_album["dir"]]["num_images"] = n.to_s
     
     arr = [ @selected_album["dir"].sub(/^#{@root_dir}\/?/, '') ]
