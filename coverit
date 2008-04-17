@@ -8,7 +8,8 @@ require "find"
 require "yaml"
 require "gdbm"
 
-require "audio_info"
+require "audioinfo"
+require "audioinfo/album"
 require "cover_scanner"
 
 require 'fileutils'
@@ -236,13 +237,13 @@ class CoverIt
 	  album = {}
 	  album["mtime"] = mtime
           begin
-	    audio_album = AudioAlbum.new(dir, true)
+	    audio_album = AudioInfo::Album.new(dir, true)
 	    if !audio_album.empty?
 	      infos = audio_album.infos
 	      infos["album"] = infos["album"].first if infos["album"].is_a?(Array)
 	      album.update(infos)
 	      album["dir"] = dir
-	      album["num_images"] = AudioAlbum.images(dir).size.to_s
+	      album["num_images"] = AudioInfo::Album.images(dir).size.to_s
 	      album["valid"] = true
 	    end
 	  rescue AudioInfoError => e
@@ -357,7 +358,7 @@ class CoverIt
     return unless row
     @selected_album = row[3]
     #return if @selected_album.nil?
-    search_str = ( @selected_album["artist"] == "various" ? "" : @selected_album["artist"] + " " ) + @selected_album["album"].gsub(AudioAlbum::MULTICD_REGEXP, '')
+    search_str = ( @selected_album["artist"] == "various" ? "" : @selected_album["artist"] + " " ) + @selected_album["album"].gsub(AudioInfo::Album::MULTICD_REGEXP, '')
     search_str = search_str.tr("-:+&,/", " ").gsub(/\([^)]+\)/, '').gsub(/\s+/, " ")
     @search_entry.text = GLib.locale_to_utf8(search_str) rescue search_str
     refresh_album_images
@@ -387,7 +388,7 @@ class CoverIt
     clear_images(@disk_image_view)
     return unless @selected_album
     #images = Dir.glob( File.join(@selected_album["dir"], "*.{jpg,jpeg,gif}") ).collect { |f| File.expand_path(f) }
-    images = AudioAlbum.images(@selected_album["dir"])
+    images = AudioInfo::Album.images(@selected_album["dir"])
     n = images.size
     if s = @treeview.selection.selected
       s[0] = n.to_s
@@ -538,7 +539,7 @@ class CoverIt
       btn = Gtk::Button.new("save")
       btn.signal_connect("clicked") do |btn|
 	ext = File.extname(im)
-	images = AudioAlbum.images(@selected_album["dir"])
+	images = AudioInfo::Album.images(@selected_album["dir"])
 	if images.detect { |f| File.basename(f) =~ /folder\.[^.]+$/ }
 	  fn = get_free_image_fn(@selected_album, ext)
 	else
