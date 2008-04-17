@@ -1,22 +1,25 @@
-#amazon search
-require 'amazon/search'
+require 'amazon/ecs'
 
 module CoverSearch 
-  class Amazon 
+  class Amazon
+    def initialize
+      amazon_key = File.read("/home/moumar/.amazon_key").chop
+      ::Amazon::Ecs.options = {:aWS_access_key_id => amazon_key}
+    end
+
     def search(query)
       links = []
-      [nil, 'fr', 'uk'].each do |country|
-	begin
-          request = ::Amazon::Search::Request.new(nil, nil, country)
-	  result = request.keyword_search(query, 'music')
-	  result.products.each do |prod|
-	    links << [ prod.image_url_small, prod.image_url_medium, prod.image_url_large ]
-	  end
-	rescue ::Amazon::Search::Request::SearchError => e
-	  #log(e.message + " '#{search_str}'")
-	end
+      [nil, :fr, :uk].each do |country|
+        res = ::Amazon::Ecs.item_search(query, :search_index => 'Music', :country => country, :response_group => "Medium")
+        res.items.each do |item|
+          %w{smallimage mediumimage largeimage}.each do |n| 
+            if h = item.get_hash(n)
+              links << h[:url]
+            end
+          end
+        end
       end
-      return links.flatten.compact
+      return links.compact
     end
   end
 end
