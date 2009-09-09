@@ -15,16 +15,12 @@ require "cover_scanner"
 require 'fileutils'
 require "timeout"
 
-#wrap long filenames in thumbnail label
-require "facet/string/line_wrap"
-
 # for rotate
 require "tempfile"
-require "facet/string/shell_escape"
-require "facet/fileutils/which"
+require "shell_escape"
 require "thread" #for Queue
 
-JPEGTRAN = FileUtils.which("jpegtran") 
+JPEGTRAN = `which jpegtran`.chop
 
 class FullsizeWindow < Gtk::Window
   def initialize(filename)
@@ -423,7 +419,11 @@ class CoverIt
 
     label_text = []
     label_text << sprintf("%dx%d", image_width, image_height)
-    label_text << name.line_wrap(30).chop
+    if name.size > 30
+      label_text << name[0..23] + ".." + name[-5..-1]
+    else
+      label_text << name
+    end
     label_text << source unless source == 'filesystem'
     if image_width > IMAGE_WIDTH
       w = IMAGE_WIDTH
