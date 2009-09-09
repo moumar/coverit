@@ -3,8 +3,7 @@ require 'amazon/ecs'
 module CoverSearch 
   class Amazon
     def initialize
-      amazon_key = File.read("/home/moumar/.amazon_key").chop
-      ::Amazon::Ecs.options = {:aWS_access_key_id => amazon_key}
+      ::Amazon::Ecs.options = YAML::load_file(File.expand_path("~/.amazon.yml"))
     end
 
     def search(query)
