@@ -605,12 +605,7 @@ class CoverIt
     cached_fn = File.join( IMAGES_DIR, URI.escape(url, /["\/:;|=,\[\]]/) )
     
     unless test(?f, cached_fn)
-      uri = URI.parse(url)
-      begin
-        http = open(uri)
-        #file_str = Net::HTTP.get(uri)
-	File.open(cached_fn, "w") { |f| FileUtils.copy_stream(http, f) }
-      end
+      `wget -O '#{cached_fn}' '#{URI.parse(url)}'`
     end
     cached_fn
   end
