@@ -330,9 +330,9 @@ class CoverIt
 	  search_done()
 	end
 	#@download_threads.list.each { |t| total == 0 ?  t.kill : t.join }
+        set_search_state(:stop)
 
       end
-      set_search_state(:stop)
     else
       search_cancelled()
     end
