@@ -2,25 +2,30 @@
 
 Dir.chdir(File.dirname($0))
 
-require "rubygems"
+require 'rubygems'
 require 'libglade2'
-require "find"
-require "yaml"
-require "gdbm"
+require 'find'
+require 'yaml'
+require 'gdbm'
 
-require "audioinfo"
-require "audioinfo/album"
-require "cover_scanner"
+require 'audioinfo'
+require 'audioinfo/album'
 
 require 'fileutils'
-require "timeout"
+require 'timeout'
 
 # for rotate
-require "tempfile"
-require "shell_escape"
-require "thread" #for Queue
+require 'tempfile'
+require 'thread' #for Queue
 
 JPEGTRAN = `which jpegtran`.chop
+
+class String
+  # escape special characters used in most unix shells to use it, for example, with system()
+  def shell_escape
+    "'" + gsub(/'/) { "'\\''" } + "'"
+  end
+end
 
 class FullsizeWindow < Gtk::Window
   def initialize(filename)
@@ -121,15 +126,6 @@ class CoverIt
     end
     @searchers_hbox.show_all
 
-
-    CoverScanner::DIMENSIONS.keys.sort.each_with_index do |type, i|
-      btn = Gtk::Button.new(type, false)
-      btn.signal_connect("clicked") do |btn|
-        on_scan_cover(type)
-      end
-      @scan_buttons_table.attach_defaults(btn, i%2, i%2 + 1, i/2, i/2 +1)
-    end
-    #@scan_buttons_table.show_all
 
 =begin
     Search.methods.sort.grep(/^search_(.+)/) do
